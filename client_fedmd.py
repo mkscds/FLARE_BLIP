@@ -1,11 +1,12 @@
 import os, sys
 from typing import Dict, List
+import numpy as np
 
 import torch
 from torch.utils.data import DataLoader
 
 import flwr as fl
-from flwr.common import Scalar, parameters_to_ndarray, ndarrays_to_parameters
+from flwr.common import Scalar, parameters_to_ndarrays, ndarrays_to_parameters
 
 from Models.models import MLP1, MLP2, MLP3, MLP4, ResNet18
 from Models.model_utils import (test,
@@ -13,10 +14,11 @@ from Models.model_utils import (test,
                                 get_parameters,
                                 FEDMD_digest_revisit,
                                 get_logits, 
-                                save_checkpoints)
+                                save_checkpoints,
+                                select_model)
 
 class FEDMD_Client(fl.client.NumPyClient):
-    def __init__(self, cid:int,
+    def __init__(self, cid_:int,
                     trainloader: DataLoader,
                     valloader: DataLoader,
                     testloader: DataLoader,
@@ -25,9 +27,10 @@ class FEDMD_Client(fl.client.NumPyClient):
                     model_architecture:str,
                     algo_type:str,
                     alpha: float,
-                    BLIP:bool):
+                    BLIP:bool,
+                    num_classes: int):
         
-        self.cid = cid
+        self.cid = cid_
         self.trainloader = trainloader
         self.valloader = valloader
         self.testloader = testloader
@@ -37,10 +40,13 @@ class FEDMD_Client(fl.client.NumPyClient):
         self.algo_type = algo_type
         self.alpha = alpha
         self.BLIP = BLIP
+        self.num_classes = num_classes
 
-        self.local_model, _ = load_models(self.model_arch, self.device, self.algo_type, self.BLIP)
+        self.local_model = select_model(self.model_arch, self.device, self.BLIP, num_classes=self.num_classes)
 
-        self.checkpoint_dir = f"{self.algo_type}/{self.alpha}/client_{self.cid}"
+        #self.local_model, _ = load_models(self.model_arch, self.device, self.algo_type, self.BLIP)
+
+        self.checkpoint_dir = f"client_checkpoints/{self.algo_type}/{self.alpha}/client_{self.cid}"
         os.makedirs(self.checkpoint_dir, exist_ok=True)
         self.optimizer = torch.optim.Adam(self.local_model.parameters(), lr=1e-3)
 
@@ -58,7 +64,10 @@ class FEDMD_Client(fl.client.NumPyClient):
         # load the model and optimizer state from the previous round.
         self._load_checkpoint(current_round - 1)
         # Digest phase
-        FEDMD_digest_revisit(self.global_data, self.local_model, self.optimizer, self.device, config, aggregated_logits=parameters, mode="digest")
+        if isinstance(parameters, list):
+            parameters_tensor = torch.tensor(np.array(parameters))
+            
+        FEDMD_digest_revisit(self.global_data, self.local_model, self.optimizer, self.device, config, aggregated_logits=parameters_tensor, mode="digest")
         # Revisit phase
         FEDMD_digest_revisit(self.trainloader, self.local_model, self.optimizer, self.device, config, aggregated_logits=None, mode="revisit")
 
@@ -79,23 +88,27 @@ class FEDMD_Client(fl.client.NumPyClient):
         return test(self.local_model, self.valloader, self.device)
     
     def evaluate(self, parameters, config):
-        current_round = config.get("server_round", 0)
+        current_round = config.get("server_round")
         self._load_checkpoint(current_round)
         loss, acc = test(self.local_model, self.testloader, self.device)
-        return float(loss), {"accuracy": float(acc)}
+        return float(loss), len(self.testloader.dataset),  {"accuracy": float(acc)}
     
 
     
     def _save_checkpoint(self, round_num: int):
-        save_checkpoints(self.local_model, self.optimizer, self.checkpoint_dir, round_num)
+        save_checkpoints(self.local_model, self.optimizer, round_num, self.checkpoint_dir)
+
 
 
     def _load_checkpoint(self, round_num: int):
-        checkpoint = torch.load(
-            os.path.join(self.checkpoint_dir, f"checkpoint_round_{round_num-1}.pt"),
-            map_location="cpu")
-        
-        self.local_model.load_state_dict(checkpoint["model"]).to(self.device)
+        checkpoint_path = os.path.join(self.checkpoint_dir, f"checkpoint_round_{round_num}.pt")
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+
+        # Move model to device first
+        self.local_model = self.local_model.to(self.device)
+
+        # Load state dicts
+        self.local_model.load_state_dict(checkpoint["model"])
         self.optimizer.load_state_dict(checkpoint["optimizer"])
 
 
@@ -109,19 +122,21 @@ def FEDMD_client_fn(trainloaders: List[DataLoader],
                     algo_type: str,
                     alpha: float,
                     BLIP: bool,
+                    num_classes: int,
                     ):
     def client_fn(cid:str) -> FEDMD_Client:
     # Create and return the client
-        return FEDMD_Client(cid=int(cid),
-                        trainloader=trainloaders[cid],
-                        valloader=valloaders[cid],
+        return FEDMD_Client(cid_=int(cid),
+                        trainloader=trainloaders[int(cid)],
+                        valloader=valloaders[int(cid)],
                         testloader=testloader,
                         serverloader=server_loader,
                         device=device,
-                        model_architecture=model_architectures[cid],
+                        model_architecture=model_architectures[int(cid)],
                         algo_type=algo_type,
                         alpha=alpha,
-                        BLIP=BLIP)
+                        BLIP=BLIP,
+                        num_classes=num_classes).to_client()
     
     return client_fn
 

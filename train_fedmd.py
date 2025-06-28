@@ -18,7 +18,7 @@ from flwr.server.server import Server
 from typing import Callable, Dict, List, OrderedDict, Tuple, Optional
 from Config import parse_arguments
 from Common.dataset_fedmd import FEDMD_load_dataloaders_blip, FEDMD_load_dataloaders_noblip
-from Models.model_utils import create_model_architectures_noblip, create_model_architectures_blip, select_model, FEDMD_digest_revisit, save_checkpoints, get_logits
+from Models.model_utils import create_model_architectures_noblip, create_model_architectures_blip, select_model, FEDMD_digest_revisit, save_checkpoints, get_logits, average_client_logits
 from Models.models import MLP1, MLP2, MLP3, MLP4, ResNet18
 
 from strategy_fedmd import FEDMD_Strategy
@@ -40,7 +40,7 @@ def run(args):
 
         config = {
             "server_round": server_round,
-            "epochs": 10,
+            "epochs": 2,
             "proximal_mu":args.proximal_mu,
             "client_kd_alpha": 0.3,
             "client_kd_temperature": 3,
@@ -56,16 +56,15 @@ def run(args):
         Generate configuration parameters for the client's evaluate operation.
         """
 
-        config = {"server_round": server_round,}
+        config = {"server_round": server_round}
 
         return config
     
 
     def weighted_average(metrics: List[Tuple[int, Dict[str, float]]]) -> Dict[str, float]:
         """Aggregate client accuracies by number of test samples"""
-        accuracies = [num_examples * m["accuracies"] for num_examples, m in metrics]
+        accuracies = [num_examples * m["accuracy"] for num_examples, m in metrics]
         examples = [num_examples for num_examples, _ in metrics]
-
         return {"accuracy": sum(accuracies) / sum(examples)}
 
 
@@ -74,7 +73,7 @@ def run(args):
         server_train_loss = 0.0
         server_train_accuracy = 0.0
 
-        print("No server model for fedmd")
+        print("\t No server model for fedmd")
 
         return 0.0, {"accuracy": 0.1}
     
@@ -87,23 +86,26 @@ def run(args):
         client_logits = {}
         config = fit_config(server_round=0)
 
-        for i, (model_arch, trainloader) in enumerate(zip(model_architectures, trainloaders)):
-            net = select_model(model_arch, args.device, args.algo_type, args.BLIP, num_classes=num_classes)
+        for i, trainloader in enumerate(trainloaders):
+            print(f"\n Transfer learning on client {i + 1}\n")
+
+            net = select_model(model_architectures[i], args.device, args.BLIP, num_classes=num_classes)
             optimizer = torch.optim.Adam(net.parameters(), lr=1e-3)
             # Training the model on public data
             FEDMD_digest_revisit(serverloader, net, optimizer, args.device, config, aggregated_logits=None, mode="revisit")
             # Training the model on private data
             FEDMD_digest_revisit(trainloader, net, optimizer, args.device, config, aggregated_logits=None, mode="revisit")
             # logit Communication for round 1
-            client_logits[i] = get_logits(net, serverloader, args.device)
+            client_logits[i] = get_logits(serverloader, net, args.device)
             # Save the model and optimizer state for each client
-            checkpoint_dir = f"{args.algo_type}/{args.alpha}/client_{i}"
+            checkpoint_dir = f"client_checkpoints/{args.algo_type}/{args.alpha}/client_{i}"
             os.makedirs(checkpoint_dir, exist_ok=True)
             save_checkpoints(net, optimizer, 0, checkpoint_dir)
 
         logits = np.vstack([client_logits[i] for i in sorted(client_logits.keys())])
+        aggregated_logits = average_client_logits(logits, num_clients=args.num_clients, num_samples=5000)
 
-        return logits
+        return aggregated_logits
 
     if args.algo_type in ["FEDMD_homogen", "FEDMD_heterogen"]:
         if args.BLIP:
@@ -113,13 +115,13 @@ def run(args):
         else:
             trainloaders, valloaders, testloader, server_loader = FEDMD_load_dataloaders_noblip(args)
             results_save_path = f"./results/NO_BLIP/{args.algo_type}/{args.alpha}"
-            model_architectures = create_model_architectures_noblip(args.available_architectures_noblip, args.algo_type, args.num_clients, args.BLIP)
-
+            model_architectures = create_model_architectures_noblip(args.available_architectures_noblip, args.algo_type, args.num_clients)
+        # get averaged logits for round 1
         logits = trasfer_learning_init(args, model_architectures, server_loader, trainloaders)
 
-        client_func = FEDMD_client_fn(trainloaders, valloaders, testloader, server_loader, args.device, model_architectures, args.algo_type, args.alpha, args.BLIP)
+        client_func = FEDMD_client_fn(trainloaders, valloaders, testloader, server_loader, args.device, model_architectures, args.algo_type, args.alpha, args.BLIP, num_classes)
 
-        server = Server(strategy=strategy, client_manager=SimpleClientManager())
+        
 
         strategy = FEDMD_Strategy(
             fraction_fit=1.0,
@@ -130,12 +132,16 @@ def run(args):
             initial_parameters=fl.common.ndarrays_to_parameters(logits),
             evaluate_fn=evaluate,
             on_fit_config_fn=fit_config,
+            on_evaluate_config_fn=eval_config,
             evaluate_metrics_aggregation_fn=weighted_average,
             client_architectures=model_architectures,
             algo_type=args.algo_type,
             server_loader=server_loader,
+            num_clients=args.num_clients,
         
         )
+
+    server = Server(strategy=strategy, client_manager=SimpleClientManager())
     
     history = fl.simulation.start_simulation(
                         client_fn=client_func,

@@ -196,12 +196,18 @@ def FEDMD_digest_revisit(dataloader, net, optimizer, device, config, aggregated_
     net.train()    
     
     if mode == "digest" and aggregated_logits is not None:
+        aggregated_logits = aggregated_logits.to(device)
         for epoch in range(epochs):
             for batch_idx, (images, labels) in enumerate(dataloader):
+                teacher_logits = None
                 images, labels = images.to(device), labels.to(device)
+                batch_size = labels.size(0)
                 optimizer.zero_grad()
+                start_idx = batch_idx * batch_size
+                end_idx = start_idx + batch_size
                 student_logits = net(images)
-                loss = kd_loss(student_logits, labels, aggregated_logits)
+                teacher_logits = aggregated_logits[start_idx: end_idx]
+                loss = kd_loss(student_logits, labels, teacher_logits)
                 loss.backward()
                 optimizer.step()
 
@@ -246,10 +252,13 @@ def average_client_logits(stacked_array: np.ndarray, weighted: bool = False, wei
         np.ndarray: Averaged logits of shape (num_samples, num_classes).
     """
 
-    num_classes = stacked_array.shape[1]
-    
-    # Reshape to (num_clients, 5000, num_classes)
-    reshaped = stacked_array.reshape(num_clients, num_samples, num_classes)
+    if len(stacked_array.shape) == 3:
+        reshaped = stacked_array
+
+    else:
+        # Reshape to (num_clients, 5000, num_classes)
+        num_classes = stacked_array.shape[1]
+        reshaped = stacked_array.reshape(num_clients, num_samples, num_classes)
 
     if weighted:
         if weights is None or len(weights) != num_clients:
