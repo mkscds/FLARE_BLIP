@@ -77,7 +77,7 @@ def run(args):
 
         return 0.0, {"accuracy": 0.1}
     
-    def trasfer_learning_init(args, model_architectures, serverloader, trainloaders):
+    def transfer_learning_init(args, model_architectures, serverloader, trainloaders):
         """
         Initialize the model for transfer learning.
         This function trains the model on the server data and then initializes client models.
@@ -117,7 +117,7 @@ def run(args):
             results_save_path = f"./results/NO_BLIP/{args.algo_type}/{args.alpha}"
             model_architectures = create_model_architectures_noblip(args.available_architectures_noblip, args.algo_type, args.num_clients)
         # get averaged logits for round 1
-        logits = trasfer_learning_init(args, model_architectures, server_loader, trainloaders)
+        logits = transfer_learning_init(args, model_architectures, server_loader, trainloaders)
 
         client_func = FEDMD_client_fn(trainloaders, valloaders, testloader, server_loader, args.device, model_architectures, args.algo_type, args.alpha, args.BLIP, num_classes)
 

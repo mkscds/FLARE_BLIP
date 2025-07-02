@@ -86,13 +86,17 @@ def train_scaffold(net: nn.Module, trainloader: DataLoader, learning_rate: float
 
 
 
-
-def train(net, trainloader, epochs: int, device: torch.cuda.device, server_rounds:int, scheduler_:bool, proximal_mu: float):
+def train(net, trainloader, optimizer, device, config, cid): 
     """Train the network on the training set."""
+    epochs = config.get("epochs", 1)
+    server_round = config.get("server_round", 0)
+    scheduler_ = config.get("scheduler_", False)
+    proximal_mu = config.get("proximal_mu", 0.0)
+
     add_epoch_acc = 0
     add_epoch_loss = 0
     criterion = torch.nn.CrossEntropyLoss()
-    optimizer = torch.optim.SGD(net.parameters(),lr=0.01)
+    #optimizer = torch.optim.SGD(net.parameters(),lr=0.01)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.1)
 
     global_params = [param.detach().clone() for param in net.parameters()]
@@ -104,7 +108,7 @@ def train(net, trainloader, epochs: int, device: torch.cuda.device, server_round
             images, labels = images.to(device), labels.to(device)
             optimizer.zero_grad()
             outputs = net(images)
-            loss = criterion(net(images), labels) + proximal_loss_func(proximal_mu, net, global_params)
+            loss = criterion(outputs, labels) + proximal_loss_func(proximal_mu, net, global_params)
             loss.backward()
             optimizer.step()
             # Metrics
@@ -121,8 +125,7 @@ def train(net, trainloader, epochs: int, device: torch.cuda.device, server_round
         add_epoch_loss+=epoch_loss
         add_epoch_acc+=epoch_acc
             
-        print("Round %d :Epoch %d: SGD lr %f -> %f" % (server_rounds,epoch, before_lr, after_lr))
-        print(f"Epoch {epoch+1}: train loss {epoch_loss}, accuracy {epoch_acc}")
+        print(f"Round --> {server_round} | Client --> {cid} | Epoch {epoch+1}: train loss {epoch_loss}, train accuracy {epoch_acc}")
 
 
 def FEDMD_train(net, trainloader, epochs: int, device: torch.cuda.device, server_rounds:int, scheduler_:bool, proximal_mu: float, mode: str):
@@ -394,14 +397,14 @@ def load_models(model_architecture: str, device: torch.device, algo_type: str, B
 
     client_model = select_model(model_architecture, device, BLIP, num_classes)
 
-    if algo_type == "homogeneous":
+    if algo_type == "PROPOSED_homogen":
         server_model = client_model.__class__().to(device)
 
-    elif algo_type == "heterogeneous":
+    elif algo_type == "PROPOSED_heterogen":
         if BLIP:
-            server_model = MLP4().to(device)
+            server_model = MLP4(num_classes=num_classes).to(device)
         else:
-            server_model = ResNet18().to(device)
+            server_model = ResNet18(num_classes).to(device)
 
     elif algo_type in ["fedavg", "fedbn", "fedprox"]:
         server_model = None
